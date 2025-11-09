@@ -1,0 +1,18 @@
+# Core dependencies
+sqlite3  # Built-in with Python, listed for documentation
+
+# Testing (optional)
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+
+# Optional: For production LLM integration examples
+# Uncomment based on your LLM provider:
+
+# OpenAI
+# openai>=1.0.0
+
+# Anthropic (Claude)
+# anthropic>=0.5.0
+
+# For type checking (development)
+# mypy>=1.0.0
