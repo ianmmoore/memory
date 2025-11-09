@@ -1,0 +1,53 @@
+# Terminal-Bench Agent Configuration
+
+agent:
+  name: "memory-guided-agent"
+  version: "0.1.0"
+  max_steps: 50
+  max_time_seconds: 600
+
+# LLM Configuration
+llm:
+  # Primary model for planning and execution
+  primary_model: "gpt-4"  # or "claude-3-opus-20240229"
+
+  # Small model for memory scoring (if using memory system)
+  small_model: "gpt-3.5-turbo"  # or "claude-3-haiku-20240307"
+
+  # Temperature settings
+  planning_temperature: 0.1
+  execution_temperature: 0.0
+
+  # Token limits
+  max_tokens: 2000
+
+# Memory System Configuration
+memory:
+  enabled: true
+  db_path: "terminal_bench_memories.db"
+
+  # Memory retrieval settings
+  relevance_threshold: 0.7
+  max_memories: 10
+
+  # Optimizations
+  enable_caching: true
+  enable_dependency_boost: true
+  enable_recency_boost: true
+
+# Execution Configuration
+execution:
+  # Command execution
+  max_command_length: 10000
+  command_timeout_seconds: 30
+
+  # Error handling
+  max_retries: 2
+  retry_delay_seconds: 1.0
+
+# Logging Configuration
+logging:
+  enabled: true
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  log_observations: true
+  log_plans: true
