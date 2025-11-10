@@ -1,0 +1,24 @@
+# Terminal-Bench Agent Requirements
+
+# Terminal-Bench (install from source or pip when available)
+# terminal-bench>=0.1.0
+
+# Memory system (local dependency)
+# Install from parent directory: pip install -e ../memory_lib
+
+# LLM APIs (choose based on your model)
+openai>=1.0.0  # For GPT models
+# anthropic>=0.5.0  # For Claude models
+
+# Async support
+asyncio-compat>=0.1.0
+
+# Configuration
+pyyaml>=6.0
+
+# Utilities
+python-dotenv>=1.0.0
+
+# Optional: For development
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
