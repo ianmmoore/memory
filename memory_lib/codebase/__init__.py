@@ -7,12 +7,13 @@ and debugging sessions.
 
 from .code_memory_system import CodeMemorySystem
 from .code_storage import CodeMemoryStorage
-from .code_retrieval import CodeMemoryRetrieval
+from .code_retrieval import CodeMemoryRetrieval, CodeContext
 from .indexer import CodeIndexer
 
 __all__ = [
     "CodeMemorySystem",
     "CodeMemoryStorage",
     "CodeMemoryRetrieval",
+    "CodeContext",
     "CodeIndexer"
 ]

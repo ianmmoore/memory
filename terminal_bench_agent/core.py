@@ -1,397 +1,289 @@
-"""Core Terminal-Bench agent with memory integration.
+"""Core agent with memory integration for Harbor/Terminal-Bench 2.0.
 
-This module implements the Terminal-Bench BaseAgent interface.
+This module implements Harbor's BaseAgent interface.
 """
 
 import asyncio
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Callable
 from datetime import datetime
 
-# Terminal-Bench imports (will be available when installed)
+# Harbor imports
 try:
-    from terminal_bench.agents import BaseAgent, AgentResult
-    from terminal_bench.terminal.tmux_session import TmuxSession
-    TBENCH_AVAILABLE = True
+    from harbor.agents.base import BaseAgent
+    from harbor.environments.base import BaseEnvironment
+    from harbor.models.agent.context import AgentContext
+    HARBOR_AVAILABLE = True
 except ImportError:
-    # For development without Terminal-Bench installed
-    TBENCH_AVAILABLE = False
+    HARBOR_AVAILABLE = False
     BaseAgent = object
-    AgentResult = dict
-    TmuxSession = object
 
 from .agent.planner import Planner
 from .agent.executor import Executor
 from .agent.actions import ActionType, Observation
 
+# OpenAI client for LLM calls
+try:
+    from openai import AsyncOpenAI
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+    AsyncOpenAI = None
 
-class MemoryGuidedAgent(BaseAgent if TBENCH_AVAILABLE else object):
-    """Terminal-Bench agent with memory-guided execution.
 
-    This agent uses the memory system for code intelligence and implements
-    a plan-execute-observe loop to solve tasks.
+class MemoryGuidedAgent(BaseAgent if HARBOR_AVAILABLE else object):
+    """Memory-guided agent for Terminal-Bench tasks via Harbor.
+
+    This agent uses a plan-execute-observe loop to solve tasks,
+    with optional memory system integration for code intelligence.
     """
 
     @staticmethod
     def name() -> str:
-        """Return agent name for Terminal-Bench."""
+        """Return agent name for Harbor."""
         return "memory-guided-agent"
+
+    def version(self) -> str | None:
+        """Return agent version."""
+        return "0.1.0"
 
     def __init__(
         self,
-        llm_function,
-        memory_system=None,
+        logs_dir: Path,
+        model_name: Optional[str] = None,
         max_steps: int = 50,
         max_time_seconds: int = 600,
+        *args,
         **kwargs
     ):
         """Initialize the agent.
 
         Args:
-            llm_function: Async function to call LLM for planning/execution
-            memory_system: Optional CodeMemorySystem for memory integration
+            logs_dir: Directory for agent logs
+            model_name: Name of the LLM model to use (e.g., "gpt-5-codex")
             max_steps: Maximum number of execution steps
             max_time_seconds: Maximum time for task execution
-            **kwargs: Additional arguments
+            *args: Additional positional arguments
+            **kwargs: Additional keyword arguments
         """
-        if TBENCH_AVAILABLE:
-            super().__init__(**kwargs)
+        if HARBOR_AVAILABLE:
+            super().__init__(logs_dir, model_name, *args, **kwargs)
 
-        self.llm = llm_function
-        self.memory = memory_system
+        # Store configuration
+        self.logs_dir = logs_dir
+        self.model_name = model_name or os.environ.get("OPENAI_MODEL", "gpt-4")
         self.max_steps = max_steps
         self.max_time_seconds = max_time_seconds
+
+        # Initialize OpenAI client
+        if not OPENAI_AVAILABLE:
+            raise ImportError("openai package is required. Install with: pip install openai")
+
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError("OPENAI_API_KEY environment variable is required")
+
+        self.client = AsyncOpenAI(api_key=api_key)
+
+        # Create LLM function
+        self.llm = self._create_llm_function()
+
+        # Memory system (not initialized - could be added later)
+        self.memory = None
 
         # Will be initialized per task
         self.planner = None
         self.executor = None
+        self.environment = None
 
-    def perform_task(
-        self,
-        task_description: str,
-        session: TmuxSession,
-        logging_dir: Optional[Path] = None,
-    ) -> AgentResult:
-        """Perform a Terminal-Bench task.
-
-        This is the main entry point called by Terminal-Bench harness.
-
-        Args:
-            task_description: Natural language description of the task
-            session: TmuxSession for interacting with terminal
-            logging_dir: Optional directory for logging
+    def _create_llm_function(self) -> Callable:
+        """Create an async LLM function for the agent.
 
         Returns:
-            AgentResult with success status and metadata
+            Async function that calls the LLM
         """
+        async def llm_function(prompt: str, **kwargs) -> str:
+            """Call the LLM with a prompt.
+
+            Args:
+                prompt: The prompt to send to the LLM
+                **kwargs: Additional arguments for the API call
+
+            Returns:
+                The LLM's response text
+            """
+            try:
+                response = await self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=kwargs.get("temperature", 0.7),
+                    max_tokens=kwargs.get("max_tokens", 4000)
+                )
+                return response.choices[0].message.content
+            except Exception as e:
+                raise RuntimeError(f"LLM call failed: {e}")
+
+        return llm_function
+
+    async def setup(self, environment: BaseEnvironment) -> None:
+        """Setup the agent in the environment.
+
+        Args:
+            environment: The Harbor environment
+        """
+        self.environment = environment
+        # No special setup needed for this agent
+        pass
+
+    async def run(
+        self,
+        instruction: str,
+        environment: BaseEnvironment,
+        context: AgentContext,
+    ) -> None:
+        """Run the agent to solve a task.
+
+        Args:
+            instruction: The task instruction
+            environment: The Harbor environment
+            context: The agent context to populate with results
+        """
+        self.environment = environment
+
         # Initialize components for this task
-        self.planner = Planner(self.llm, self.memory)
-        self.executor = Executor(session)
+        # Note: For now, we'll execute commands directly in the environment
+        # In a full implementation, we'd need a proper Executor that works with Harbor's environment
 
-        # Run async task in event loop
-        try:
-            result = asyncio.run(self._solve_task_async(
-                task_description,
-                logging_dir
-            ))
-            return result
-        except Exception as e:
-            return AgentResult(
-                success=False,
-                metadata={
-                    "error": str(e),
-                    "error_type": type(e).__name__
-                }
-            ) if TBENCH_AVAILABLE else {
-                "success": False,
-                "error": str(e)
-            }
-
-    async def _solve_task_async(
-        self,
-        task_description: str,
-        logging_dir: Optional[Path]
-    ) -> AgentResult:
-        """Async task solving logic.
-
-        Args:
-            task_description: Task to solve
-            logging_dir: Logging directory
-
-        Returns:
-            AgentResult
-        """
         start_time = datetime.now()
         observations = []
         current_step = 0
 
-        # Get environment info
-        env_info = self._get_environment_info()
-
-        # Retrieve relevant memories if memory system available
-        relevant_memories = None
-        if self.memory:
-            relevant_memories = await self._retrieve_memories(task_description)
-
-        # Create initial plan
-        plan = await self.planner.create_plan(
-            task_description,
-            env_info,
-            relevant_memories
-        )
-
-        # Log initial state
-        if logging_dir:
-            self._log(logging_dir, f"Task: {task_description}\n")
-            self._log(logging_dir, f"Plan: {len(plan)} steps\n\n")
-
-        # Main execution loop
-        while current_step < self.max_steps:
-            # Check timeout
-            elapsed = (datetime.now() - start_time).total_seconds()
-            if elapsed > self.max_time_seconds:
-                if logging_dir:
-                    self._log(logging_dir, f"\nTimeout after {elapsed}s\n")
-                break
-
-            # Get next action
-            last_error = None
-            if observations and not observations[-1].success:
-                last_error = observations[-1].error
-
-            action = await self.planner.next_action(
-                task_description,
-                plan,
-                current_step,
-                observations[-5:],  # Last 5 observations
-                last_error
-            )
-
-            # Check if done
-            if action.action_type == ActionType.DONE:
-                if logging_dir:
-                    self._log(logging_dir, "\nAgent marked task as DONE\n")
-                break
-
-            # Execute action
-            observation = self.executor.execute(action)
-            observations.append(observation)
-
-            # Log execution
-            if logging_dir:
-                self._log(logging_dir, f"\nStep {current_step + 1}:\n")
-                self._log(logging_dir, f"Action: {action.action_type.value}\n")
-                self._log(logging_dir, f"Command: {action.command}\n")
-                self._log(logging_dir, f"Success: {observation.success}\n")
-                if observation.output:
-                    self._log(logging_dir, f"Output: {observation.output[:500]}\n")
-                if observation.error:
-                    self._log(logging_dir, f"Error: {observation.error}\n")
-
-            current_step += 1
-
-            # Small delay to avoid overwhelming the terminal
-            await asyncio.sleep(0.1)
-
-        # Store learnings in memory if successful
-        if self.memory and observations:
-            await self._store_learnings(
-                task_description,
-                observations,
-                success=True  # Will be determined by Terminal-Bench tests
-            )
-
-        # Return result
-        total_time = (datetime.now() - start_time).total_seconds()
-
-        result_metadata = {
-            "total_steps": current_step,
-            "total_time_seconds": total_time,
-            "observations_count": len(observations),
-            "plan_steps": len(plan)
-        }
-
-        if logging_dir:
-            self._log(logging_dir, f"\n\nCompleted in {total_time}s with {current_step} steps\n")
-
-        # Terminal-Bench will run tests to determine actual success
-        # We return our best attempt
-        return AgentResult(
-            success=True,  # Tests will determine real success
-            metadata=result_metadata
-        ) if TBENCH_AVAILABLE else result_metadata
-
-    async def _retrieve_memories(self, task_description: str) -> Optional[str]:
-        """Retrieve relevant memories for task.
-
-        Args:
-            task_description: Task description
-
-        Returns:
-            Formatted memories or None
-        """
-        if not self.memory:
-            return None
-
         try:
-            from memory_lib.codebase import CodeContext
+            # Get environment info
+            env_info = "Docker container with standard Linux environment"
 
-            context = CodeContext(
-                user_query=task_description,
-                additional_context="Terminal-Bench task"
+            # Create initial plan
+            self.planner = Planner(self.llm, self.memory)
+            plan = await self.planner.create_plan(
+                instruction,
+                env_info,
+                None  # No memory retrieval for now
             )
 
-            memories = await self.memory.retrieve_relevant_memories(context)
+            # Log initial state
+            self._log(f"Task: {instruction}\n")
+            self._log(f"Plan: {len(plan)} steps\n\n")
 
-            if memories:
-                return self.memory.format_memories_for_prompt(
-                    memories,
-                    include_scores=True
+            # Main execution loop
+            while current_step < self.max_steps:
+                # Check timeout
+                elapsed = (datetime.now() - start_time).total_seconds()
+                if elapsed > self.max_time_seconds:
+                    self._log(f"\nTimeout after {elapsed}s\n")
+                    break
+
+                # Get next action
+                last_error = None
+                if observations and not observations[-1].success:
+                    last_error = observations[-1].error
+
+                action = await self.planner.next_action(
+                    instruction,
+                    plan,
+                    current_step,
+                    observations[-5:] if observations else [],
+                    last_error
                 )
 
-        except Exception as e:
-            # Memory retrieval failed, continue without
-            pass
+                # Check if done
+                if action.action_type == ActionType.DONE:
+                    self._log("\nAgent marked task as DONE\n")
+                    break
 
-        return None
+                # Execute action in environment
+                if action.action_type == ActionType.BASH_COMMAND and action.command:
+                    # Execute bash command in Harbor environment
+                    try:
+                        result = await environment.exec(action.command)
+                        success = result.return_code == 0
+                        output_text = result.stdout or ""
+                        error_text = result.stderr if result.return_code != 0 else None
 
-    async def _store_learnings(
-        self,
-        task_description: str,
-        observations: list,
-        success: bool
-    ):
-        """Store task solution in memory.
+                        observation = Observation(
+                            action=action,
+                            output=output_text,
+                            success=success,
+                            error=error_text
+                        )
+                    except Exception as e:
+                        observation = Observation(
+                            action=action,
+                            output="",
+                            success=False,
+                            error=str(e)
+                        )
 
-        Args:
-            task_description: Task that was solved
-            observations: Observations from execution
-            success: Whether task was successful
-        """
-        if not self.memory:
-            return
+                    observations.append(observation)
 
-        try:
-            # Extract commands used
-            commands = [
-                obs.action.command
-                for obs in observations
-                if obs.action.command and obs.action.action_type != ActionType.THINK
-            ]
+                    # Log execution
+                    self._log(f"\nStep {current_step + 1}:\n")
+                    self._log(f"Command: {action.command}\n")
+                    self._log(f"Return Code: {result.return_code if 'result' in locals() else 'N/A'}\n")
+                    self._log(f"Success: {observation.success}\n")
+                    if observation.output:
+                        self._log(f"Output: {observation.output[:500]}\n")
+                    if observation.error:
+                        self._log(f"Error: {observation.error}\n")
 
-            # Create solution summary
-            solution_content = f"""Task: {task_description}
+                current_step += 1
 
-Success: {success}
+                # Small delay
+                await asyncio.sleep(0.1)
 
-Steps taken: {len(observations)}
+            # Return result via context
+            total_time = (datetime.now() - start_time).total_seconds()
+            self._log(f"\n\nCompleted in {total_time}s with {current_step} steps\n")
 
-Commands used:
-{chr(10).join(f"- {cmd}" for cmd in commands[:10])}
-
-Key insights:
-{'This solution worked.' if success else 'This approach did not work.'}
-"""
-
-            # Store as documentation memory
-            self.memory.add_documentation_memory(
-                title=f"Terminal-Bench Task: {task_description[:50]}",
-                content=solution_content,
-                category="terminal_bench_task",
-                metadata={
-                    "success": success,
-                    "steps": len(observations),
-                    "timestamp": datetime.now().isoformat()
-                }
-            )
+            # Populate context with execution info
+            # Harbor will run verifiers to determine actual success
 
         except Exception as e:
-            # Failed to store, but don't fail the task
-            pass
+            self._log(f"\nError during execution: {e}\n")
+            raise
 
-    def _get_environment_info(self) -> str:
-        """Get basic environment information.
-
-        Returns:
-            Environment description
-        """
-        return "Docker container with standard Linux environment"
-
-    def _log(self, logging_dir: Path, message: str):
+    def _log(self, message: str):
         """Write to log file.
 
         Args:
-            logging_dir: Directory for logs
             message: Message to log
         """
-        if not logging_dir:
-            return
-
         try:
-            log_file = logging_dir / "agent_execution.log"
+            log_file = self.logs_dir / "agent_execution.log"
             with open(log_file, "a") as f:
                 f.write(message)
         except Exception:
             pass
 
 
-# For standalone testing without Terminal-Bench
+# For standalone testing
 async def test_agent_standalone():
-    """Test agent without Terminal-Bench harness."""
-    print("Testing agent in standalone mode...")
+    """Test agent in standalone mode."""
+    print("Testing Harbor agent...")
 
-    async def mock_llm(prompt: str) -> str:
-        """Mock LLM for testing."""
-        # Simple plan generation
-        if "Create a detailed plan" in prompt:
-            return """[
-                {
-                    "description": "Check current directory",
-                    "action_type": "bash",
-                    "command": "pwd",
-                    "expected_outcome": "Current directory path"
-                },
-                {
-                    "description": "List files",
-                    "action_type": "bash",
-                    "command": "ls -la",
-                    "expected_outcome": "Directory contents"
-                },
-                {
-                    "description": "Complete task",
-                    "action_type": "done",
-                    "command": "",
-                    "expected_outcome": "Task finished"
-                }
-            ]"""
-        return '{"action_type": "bash", "command": "ls", "reasoning": "Explore"}'
-
-    class MockSession:
-        """Mock TmuxSession for testing."""
-        def send_keys(self, command):
-            print(f"  [EXEC] {command}")
-
-        def capture_pane(self):
-            return "/home/user\ntotal 8\ndrwxr-xr-x 2 user user 4096 Jan 1 12:00 .\ndrwxr-xr-x 3 user user 4096 Jan 1 12:00 .."
+    from pathlib import Path
 
     agent = MemoryGuidedAgent(
-        llm_function=mock_llm,
-        memory_system=None,
+        logs_dir=Path("/tmp/harbor_test"),
+        model_name="gpt-4",
         max_steps=10
     )
 
-    print("\nRunning test task...")
-    result = agent.perform_task(
-        task_description="List all files in the current directory",
-        session=MockSession(),
-        logging_dir=Path("/tmp/agent_test")
-    )
-
-    print(f"\nResult: {result}")
-    print("\nTest completed!")
+    print(f"Agent: {agent.name()}")
+    print(f"Version: {agent.version()}")
+    print(f"Model: {agent.model_name}")
+    print("\nAgent initialized successfully!")
 
 
 if __name__ == "__main__":
-    # Run standalone test
     asyncio.run(test_agent_standalone())

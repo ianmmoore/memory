@@ -12,7 +12,8 @@ setup(
     description="Memory-guided agent for Terminal-Bench",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    packages=find_packages(),
+    package_dir={"": ".."},
+    packages=["terminal_bench_agent", "terminal_bench_agent.agent"],
     classifiers=[
         "Development Status :: 3 - Alpha",
         "Intended Audience :: Developers",

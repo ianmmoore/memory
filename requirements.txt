@@ -1,17 +1,20 @@
 # Core dependencies
-sqlite3  # Built-in with Python, listed for documentation
+# sqlite3 is built-in with Python
 
 # Testing (optional)
 pytest>=7.0.0
 pytest-asyncio>=0.21.0
 
-# Optional: For production LLM integration examples
-# Uncomment based on your LLM provider:
+# LLM integration
+openai>=1.0.0
+pyyaml>=6.0.0
+python-dotenv>=1.0.0
 
-# OpenAI
-# openai>=1.0.0
+# Terminal-Bench (requires Python >= 3.12)
+# Install manually: pip install terminal-bench
+# terminal-bench>=0.1.0
 
-# Anthropic (Claude)
+# Anthropic (Claude) - optional
 # anthropic>=0.5.0
 
 # For type checking (development)
