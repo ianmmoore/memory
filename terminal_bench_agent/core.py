@@ -23,13 +23,12 @@ from .agent.planner import Planner
 from .agent.executor import Executor
 from .agent.actions import ActionType, Observation
 
-# OpenAI client for LLM calls
+# LiteLLM for model calls (supports both chat completions and responses API)
 try:
-    from openai import AsyncOpenAI
-    OPENAI_AVAILABLE = True
+    from litellm import acompletion
+    LITELLM_AVAILABLE = True
 except ImportError:
-    OPENAI_AVAILABLE = False
-    AsyncOpenAI = None
+    LITELLM_AVAILABLE = False
 
 
 class MemoryGuidedAgent(BaseAgent if HARBOR_AVAILABLE else object):
@@ -52,7 +51,7 @@ class MemoryGuidedAgent(BaseAgent if HARBOR_AVAILABLE else object):
         self,
         logs_dir: Path,
         model_name: Optional[str] = None,
-        max_steps: int = 50,
+        max_steps: int = 100,
         max_time_seconds: int = 600,
         *args,
         **kwargs
@@ -76,15 +75,13 @@ class MemoryGuidedAgent(BaseAgent if HARBOR_AVAILABLE else object):
         self.max_steps = max_steps
         self.max_time_seconds = max_time_seconds
 
-        # Initialize OpenAI client
-        if not OPENAI_AVAILABLE:
-            raise ImportError("openai package is required. Install with: pip install openai")
+        # Initialize LiteLLM
+        if not LITELLM_AVAILABLE:
+            raise ImportError("litellm package is required. Install with: pip install litellm")
 
         api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
             raise ValueError("OPENAI_API_KEY environment variable is required")
-
-        self.client = AsyncOpenAI(api_key=api_key)
 
         # Create LLM function
         self.llm = self._create_llm_function()
@@ -103,6 +100,9 @@ class MemoryGuidedAgent(BaseAgent if HARBOR_AVAILABLE else object):
         Returns:
             Async function that calls the LLM
         """
+        # gpt-5-codex requires temperature=1.0
+        default_temp = 1.0 if "gpt-5" in self.model_name.lower() else 0.7
+
         async def llm_function(prompt: str, **kwargs) -> str:
             """Call the LLM with a prompt.
 
@@ -114,11 +114,12 @@ class MemoryGuidedAgent(BaseAgent if HARBOR_AVAILABLE else object):
                 The LLM's response text
             """
             try:
-                response = await self.client.chat.completions.create(
+                # Use LiteLLM which handles both chat completions and responses API
+                response = await acompletion(
                     model=self.model_name,
                     messages=[{"role": "user", "content": prompt}],
-                    temperature=kwargs.get("temperature", 0.7),
-                    max_tokens=kwargs.get("max_tokens", 4000)
+                    temperature=kwargs.get("temperature", default_temp),
+                    max_tokens=kwargs.get("max_tokens", 1500)  # Reduced further for gpt-5-codex output limits
                 )
                 return response.choices[0].message.content
             except Exception as e:
@@ -171,9 +172,10 @@ class MemoryGuidedAgent(BaseAgent if HARBOR_AVAILABLE else object):
                 None  # No memory retrieval for now
             )
 
-            # Log initial state
-            self._log(f"Task: {instruction}\n")
-            self._log(f"Plan: {len(plan)} steps\n\n")
+            # Log initial state with timestamp
+            self._log(f"[{datetime.now().strftime('%H:%M:%S')}] Task: {instruction}\n")
+            self._log(f"[{datetime.now().strftime('%H:%M:%S')}] Initial plan: {len(plan)} steps\n")
+            self._log(f"Max steps allowed: {self.max_steps}, Max time: {self.max_time_seconds}s\n\n")
 
             # Main execution loop
             while current_step < self.max_steps:
@@ -226,8 +228,12 @@ class MemoryGuidedAgent(BaseAgent if HARBOR_AVAILABLE else object):
 
                     observations.append(observation)
 
-                    # Log execution
-                    self._log(f"\nStep {current_step + 1}:\n")
+                    # Track current plan size (may change due to replanning)
+                    current_plan_size = len(self.planner.current_plan) if self.planner.current_plan else 0
+                    plan_progress = f"{self.planner.current_step_index}/{current_plan_size}" if current_plan_size > 0 else "N/A"
+
+                    # Log execution with timestamp and progress
+                    self._log(f"\n[{datetime.now().strftime('%H:%M:%S')}] Step {current_step + 1}/{self.max_steps} (Plan: {plan_progress}, Replans: {self.planner.replan_count})\n")
                     self._log(f"Command: {action.command}\n")
                     self._log(f"Return Code: {result.return_code if 'result' in locals() else 'N/A'}\n")
                     self._log(f"Success: {observation.success}\n")
