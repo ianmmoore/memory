@@ -4,6 +4,8 @@
 This script lists all sandboxes and optionally archives/deletes old ones
 to free up storage space.
 
+NOW USES: DaytonaCleanupManager with retry logic and proper error handling.
+
 Usage:
     # List all sandboxes
     python scripts/cleanup_daytona.py --list
@@ -23,6 +25,15 @@ import os
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
+
+# Add parent directory to path to import cleanup_manager
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+try:
+    from cleanup_manager import DaytonaCleanupManager, CleanupError, RetryableCleanupError
+    CLEANUP_MANAGER_AVAILABLE = True
+except ImportError:
+    CLEANUP_MANAGER_AVAILABLE = False
 
 try:
     from daytona import Daytona
@@ -213,7 +224,7 @@ def delete_all_sandboxes(client: Daytona, confirmed: bool = False) -> int:
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
-        description="Cleanup Daytona sandboxes to free up storage"
+        description="Cleanup Daytona sandboxes to free up storage (with retry logic)"
     )
     parser.add_argument(
         "--list",
@@ -257,6 +268,11 @@ def main():
         action="store_true",
         help="Actually perform the operations (disables dry-run)"
     )
+    parser.add_argument(
+        "--fail-fast",
+        action="store_true",
+        help="Stop on first cleanup failure (default: continue on errors)"
+    )
 
     args = parser.parse_args()
 
@@ -269,48 +285,122 @@ def main():
     # Determine dry-run mode
     dry_run = not args.no_dry_run
 
-    # Initialize Daytona client
-    print("Connecting to Daytona...")
-    try:
-        # Daytona reads from DAYTONA_API_KEY environment variable automatically
-        client = Daytona()
-    except Exception as e:
-        print(f"Error connecting to Daytona: {e}")
-        sys.exit(1)
-
-    # Execute requested action
-    if args.list or not any([args.delete_old, args.delete_stopped, args.delete_all]):
-        # Default action: list sandboxes
-        sandboxes = list_sandboxes(client)
-        print_sandbox_info(sandboxes)
-
-        # Print storage info if available
-        print("To free up storage:")
-        print("  - Delete old sandboxes: python cleanup_daytona.py --delete-old --days 1 --no-dry-run")
-        print("  - Delete stopped: python cleanup_daytona.py --delete-stopped --no-dry-run")
-
-    elif args.delete_old:
-        print(f"\nDeleting sandboxes older than {args.days} day(s)...")
-        if dry_run:
-            print("(DRY RUN - use --no-dry-run to actually delete)\n")
-        count = delete_old_sandboxes(client, args.days, dry_run)
-        print(f"\n{'Would delete' if dry_run else 'Deleted'} {count} sandbox(es)")
-
-    elif args.delete_stopped:
-        print("\nDeleting stopped/failed sandboxes...")
-        if dry_run:
-            print("(DRY RUN - use --no-dry-run to actually delete)\n")
-        count = delete_stopped_sandboxes(client, dry_run)
-        print(f"\n{'Would delete' if dry_run else 'Deleted'} {count} sandbox(es)")
-
-    elif args.delete_all:
-        if not args.confirm:
-            print("\nError: Deleting all sandboxes requires --confirm flag")
-            print("Usage: python cleanup_daytona.py --delete-all --confirm --no-dry-run")
+    # Use new cleanup manager if available, otherwise fall back to old implementation
+    if CLEANUP_MANAGER_AVAILABLE and not dry_run:
+        print("Using DaytonaCleanupManager with retry logic...\n")
+        try:
+            manager = DaytonaCleanupManager(api_key=api_key)
+        except (CleanupError, Exception) as e:
+            print(f"Error initializing cleanup manager: {e}")
             sys.exit(1)
 
-        count = delete_all_sandboxes(client, args.confirm)
-        print(f"\nDeleted {count} sandbox(es)")
+        # Execute requested action with new manager
+        if args.list or not any([args.delete_old, args.delete_stopped, args.delete_all]):
+            # List sandboxes
+            sandboxes = manager.list_sandboxes()
+            print_sandbox_info(sandboxes)
+            print("\nTo free up storage:")
+            print("  - Delete old: python cleanup_daytona.py --delete-old --days 1 --no-dry-run")
+            print("  - Delete stopped: python cleanup_daytona.py --delete-stopped --no-dry-run")
+
+        elif args.delete_old:
+            print(f"Deleting sandboxes older than {args.days} day(s)...\n")
+            try:
+                deleted, failed = manager.cleanup_old_sandboxes(
+                    max_age_days=args.days,
+                    fail_fast=args.fail_fast
+                )
+                print(f"\n✓ Deleted {deleted} sandbox(es)")
+                if failed > 0:
+                    print(f"⚠  {failed} deletion(s) failed (with retries)")
+            except CleanupError as e:
+                print(f"\n✗ Cleanup failed: {e}")
+                sys.exit(1)
+
+        elif args.delete_stopped:
+            print("Deleting stopped/failed sandboxes...\n")
+            try:
+                deleted, failed = manager.cleanup_stopped_sandboxes(fail_fast=args.fail_fast)
+                print(f"\n✓ Deleted {deleted} sandbox(es)")
+                if failed > 0:
+                    print(f"⚠  {failed} deletion(s) failed (with retries)")
+            except CleanupError as e:
+                print(f"\n✗ Cleanup failed: {e}")
+                sys.exit(1)
+
+        elif args.delete_all:
+            if not args.confirm:
+                print("\nError: Deleting all sandboxes requires --confirm flag")
+                print("Usage: python cleanup_daytona.py --delete-all --confirm --no-dry-run")
+                sys.exit(1)
+
+            sandboxes = manager.list_sandboxes()
+            print(f"\n⚠️  WARNING: Deleting ALL {len(sandboxes)} sandboxes!\n")
+
+            deleted = 0
+            failed = 0
+            for sandbox in sandboxes:
+                sandbox_id = getattr(sandbox, 'id', 'unknown')
+                try:
+                    manager.delete_sandbox(sandbox_id)
+                    deleted += 1
+                    print(f"  ✓ Deleted {sandbox_id}")
+                except RetryableCleanupError as e:
+                    failed += 1
+                    print(f"  ✗ Failed {sandbox_id}: {e}")
+                    if args.fail_fast:
+                        print("\n✗ Stopping due to --fail-fast")
+                        break
+
+            print(f"\n✓ Deleted {deleted} sandbox(es)")
+            if failed > 0:
+                print(f"⚠  {failed} deletion(s) failed (with retries)")
+
+    else:
+        # Fall back to old implementation for dry-run or if manager not available
+        if dry_run:
+            print("Running in DRY RUN mode (old implementation)...\n")
+        else:
+            print("Using old cleanup implementation (cleanup_manager not available)...\n")
+
+        # Initialize Daytona client
+        print("Connecting to Daytona...")
+        try:
+            client = Daytona()
+        except Exception as e:
+            print(f"Error connecting to Daytona: {e}")
+            sys.exit(1)
+
+        # Execute requested action with old implementation
+        if args.list or not any([args.delete_old, args.delete_stopped, args.delete_all]):
+            sandboxes = list_sandboxes(client)
+            print_sandbox_info(sandboxes)
+            print("To free up storage:")
+            print("  - Delete old: python cleanup_daytona.py --delete-old --days 1 --no-dry-run")
+            print("  - Delete stopped: python cleanup_daytona.py --delete-stopped --no-dry-run")
+
+        elif args.delete_old:
+            print(f"\nDeleting sandboxes older than {args.days} day(s)...")
+            if dry_run:
+                print("(DRY RUN - use --no-dry-run to actually delete)\n")
+            count = delete_old_sandboxes(client, args.days, dry_run)
+            print(f"\n{'Would delete' if dry_run else 'Deleted'} {count} sandbox(es)")
+
+        elif args.delete_stopped:
+            print("\nDeleting stopped/failed sandboxes...")
+            if dry_run:
+                print("(DRY RUN - use --no-dry-run to actually delete)\n")
+            count = delete_stopped_sandboxes(client, dry_run)
+            print(f"\n{'Would delete' if dry_run else 'Deleted'} {count} sandbox(es)")
+
+        elif args.delete_all:
+            if not args.confirm:
+                print("\nError: Deleting all sandboxes requires --confirm flag")
+                print("Usage: python cleanup_daytona.py --delete-all --confirm --no-dry-run")
+                sys.exit(1)
+
+            count = delete_all_sandboxes(client, args.confirm)
+            print(f"\nDeleted {count} sandbox(es)")
 
     print("\n✓ Done!")
 

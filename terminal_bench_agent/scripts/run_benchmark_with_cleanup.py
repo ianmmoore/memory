@@ -4,6 +4,8 @@
 This wrapper automatically cleans up old sandboxes before running
 the benchmark to avoid hitting disk limits.
 
+NOW USES: DaytonaCleanupManager with retry logic and proper error handling.
+
 Usage:
     python scripts/run_benchmark_with_cleanup.py
     python scripts/run_benchmark_with_cleanup.py --skip-cleanup
@@ -20,6 +22,13 @@ from datetime import datetime, timedelta
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 try:
+    from cleanup_manager import DaytonaCleanupManager, DockerCleanupManager, CleanupError
+    CLEANUP_MANAGER_AVAILABLE = True
+except ImportError:
+    CLEANUP_MANAGER_AVAILABLE = False
+    print("Warning: cleanup_manager not available. Using old cleanup implementation.")
+
+try:
     from daytona import Daytona
     DAYTONA_AVAILABLE = True
 except ImportError:
@@ -27,12 +36,13 @@ except ImportError:
     print("Warning: Daytona SDK not installed. Skipping cleanup.")
 
 
-def cleanup_sandboxes(max_age_days: int = 1, also_delete_stopped: bool = True):
+def cleanup_sandboxes(max_age_days: int = 1, also_delete_stopped: bool = True, fail_on_error: bool = False):
     """Cleanup old Daytona sandboxes before running benchmark.
 
     Args:
         max_age_days: Delete sandboxes older than this many days
         also_delete_stopped: Also delete stopped/failed sandboxes regardless of age
+        fail_on_error: If True, raise exception on cleanup failure; if False, continue
     """
     if not DAYTONA_AVAILABLE:
         print("⚠️  Daytona SDK not available, skipping cleanup")
@@ -47,84 +57,160 @@ def cleanup_sandboxes(max_age_days: int = 1, also_delete_stopped: bool = True):
     print("CLEANING UP OLD DAYTONA SANDBOXES")
     print("="*80 + "\n")
 
-    try:
-        # Daytona reads from DAYTONA_API_KEY environment variable automatically
-        client = Daytona()
+    # Use new cleanup manager if available
+    if CLEANUP_MANAGER_AVAILABLE:
+        print("Using DaytonaCleanupManager with retry logic...\n")
+        try:
+            manager = DaytonaCleanupManager(api_key=api_key)
 
-        # List current sandboxes
-        print("Fetching sandbox list...")
-        result = client.list()
-        sandboxes = getattr(result, 'items', [])
-        print(f"Found {len(sandboxes)} sandbox(es)\n")
+            # Check current state
+            sandboxes = manager.list_sandboxes()
+            print(f"Found {len(sandboxes)} sandbox(es)\n")
 
-        if len(sandboxes) == 0:
-            print("No sandboxes to clean up.\n")
-            return
+            if len(sandboxes) == 0:
+                print("No sandboxes to clean up.\n")
+                return
 
-        deleted_count = 0
+            total_deleted = 0
+            total_failed = 0
 
-        # Delete stopped/failed sandboxes first
-        if also_delete_stopped:
-            print("Deleting stopped/failed sandboxes...")
+            # Delete stopped/failed sandboxes first
+            if also_delete_stopped:
+                print("Deleting stopped/failed sandboxes...")
+                try:
+                    deleted, failed = manager.cleanup_stopped_sandboxes(fail_fast=False)
+                    total_deleted += deleted
+                    total_failed += failed
+                    print(f"  ✓ Deleted {deleted} stopped sandbox(es)")
+                    if failed > 0:
+                        print(f"  ⚠  {failed} deletion(s) failed (after retries)")
+                except CleanupError as e:
+                    print(f"  ✗ Stopped cleanup failed: {e}")
+                    if fail_on_error:
+                        raise
+                print()
+
+            # Delete old sandboxes
+            print(f"Deleting sandboxes older than {max_age_days} day(s)...")
+            try:
+                deleted, failed = manager.cleanup_old_sandboxes(
+                    max_age_days=max_age_days,
+                    fail_fast=False
+                )
+                total_deleted += deleted
+                total_failed += failed
+                print(f"  ✓ Deleted {deleted} old sandbox(es)")
+                if failed > 0:
+                    print(f"  ⚠  {failed} deletion(s) failed (after retries)")
+            except CleanupError as e:
+                print(f"  ✗ Old cleanup failed: {e}")
+                if fail_on_error:
+                    raise
+
+            print(f"\n✓ Cleanup complete! Removed {total_deleted} sandbox(es) total")
+            if total_failed > 0:
+                print(f"⚠️  WARNING: {total_failed} deletion(s) failed even after retries!")
+                if fail_on_error:
+                    raise CleanupError(f"{total_failed} cleanup operations failed")
+            print()
+
+        except CleanupError as e:
+            print(f"\n✗ CRITICAL: Cleanup failed: {e}")
+            if fail_on_error:
+                raise
+            else:
+                print("Continuing with benchmark anyway...\n")
+        except Exception as e:
+            print(f"\n⚠️  Unexpected cleanup error: {e}")
+            if fail_on_error:
+                raise
+            else:
+                print("Continuing with benchmark anyway...\n")
+
+    else:
+        # Fall back to old implementation
+        print("Using old cleanup implementation (cleanup_manager not available)...\n")
+        try:
+            # Daytona reads from DAYTONA_API_KEY environment variable automatically
+            client = Daytona()
+
+            # List current sandboxes
+            print("Fetching sandbox list...")
+            result = client.list()
+            sandboxes = getattr(result, 'items', [])
+            print(f"Found {len(sandboxes)} sandbox(es)\n")
+
+            if len(sandboxes) == 0:
+                print("No sandboxes to clean up.\n")
+                return
+
+            deleted_count = 0
+
+            # Delete stopped/failed sandboxes first
+            if also_delete_stopped:
+                print("Deleting stopped/failed sandboxes...")
+                for sandbox in sandboxes:
+                    try:
+                        status = getattr(sandbox, 'status', '').lower()
+                        sandbox_id = getattr(sandbox, 'id', 'unknown')
+
+                        if status in ['stopped', 'terminated', 'failed', 'error', 'exited']:
+                            print(f"  Deleting {sandbox_id} (status: {status})...")
+                            try:
+                                client.delete(sandbox_id)
+                                print(f"    ✓ Deleted")
+                                deleted_count += 1
+                            except Exception as e:
+                                print(f"    ✗ Failed: {e}")
+                    except Exception as e:
+                        print(f"  Error processing sandbox: {e}")
+
+            # Delete old sandboxes
+            cutoff_date = datetime.now(datetime.now().astimezone().tzinfo) - timedelta(days=max_age_days)
+
+            print(f"\nDeleting sandboxes older than {max_age_days} day(s)...")
             for sandbox in sandboxes:
                 try:
-                    status = getattr(sandbox, 'status', '').lower()
-                    sandbox_id = getattr(sandbox, 'id', 'unknown')
+                    created = getattr(sandbox, 'created_at', None)
+                    if not created:
+                        continue
 
+                    # Parse created timestamp
+                    if isinstance(created, str):
+                        created_dt = datetime.fromisoformat(created.replace('Z', '+00:00'))
+                    elif isinstance(created, datetime):
+                        created_dt = created
+                    else:
+                        continue
+
+                    sandbox_id = getattr(sandbox, 'id', 'unknown')
+                    status = getattr(sandbox, 'status', '').lower()
+
+                    # Skip if already deleted
                     if status in ['stopped', 'terminated', 'failed', 'error', 'exited']:
-                        print(f"  Deleting {sandbox_id} (status: {status})...")
+                        continue
+
+                    # Check if older than cutoff
+                    if created_dt < cutoff_date:
+                        print(f"  Deleting {sandbox_id} (created {created_dt.strftime('%Y-%m-%d %H:%M')})...")
                         try:
                             client.delete(sandbox_id)
                             print(f"    ✓ Deleted")
                             deleted_count += 1
                         except Exception as e:
                             print(f"    ✗ Failed: {e}")
+
                 except Exception as e:
                     print(f"  Error processing sandbox: {e}")
 
-        # Delete old sandboxes
-        cutoff_date = datetime.now(datetime.now().astimezone().tzinfo) - timedelta(days=max_age_days)
+            print(f"\n✓ Cleanup complete! Removed {deleted_count} sandbox(es)\n")
 
-        print(f"\nDeleting sandboxes older than {max_age_days} day(s)...")
-        for sandbox in sandboxes:
-            try:
-                created = getattr(sandbox, 'created_at', None)
-                if not created:
-                    continue
-
-                # Parse created timestamp
-                if isinstance(created, str):
-                    created_dt = datetime.fromisoformat(created.replace('Z', '+00:00'))
-                elif isinstance(created, datetime):
-                    created_dt = created
-                else:
-                    continue
-
-                sandbox_id = getattr(sandbox, 'id', 'unknown')
-                status = getattr(sandbox, 'status', '').lower()
-
-                # Skip if already deleted
-                if status in ['stopped', 'terminated', 'failed', 'error', 'exited']:
-                    continue
-
-                # Check if older than cutoff
-                if created_dt < cutoff_date:
-                    print(f"  Deleting {sandbox_id} (created {created_dt.strftime('%Y-%m-%d %H:%M')})...")
-                    try:
-                        client.delete(sandbox_id)
-                        print(f"    ✓ Deleted")
-                        deleted_count += 1
-                    except Exception as e:
-                        print(f"    ✗ Failed: {e}")
-
-            except Exception as e:
-                print(f"  Error processing sandbox: {e}")
-
-        print(f"\n✓ Cleanup complete! Removed {deleted_count} sandbox(es)\n")
-
-    except Exception as e:
-        print(f"⚠️  Cleanup failed: {e}")
-        print("Continuing with benchmark anyway...\n")
+        except Exception as e:
+            print(f"⚠️  Cleanup failed: {e}")
+            if fail_on_error:
+                raise
+            else:
+                print("Continuing with benchmark anyway...\n")
 
 
 def main():

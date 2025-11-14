@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 from typing import Optional
 import litellm
+import logging
 
 from harbor.agents.terminus_2 import Terminus2
 from harbor.agents.terminus_2.tmux_session import TmuxSession
@@ -12,6 +13,13 @@ from harbor.models.agent.name import AgentName
 
 # Import custom ResponsesLLM for GPT-5 models
 from terminal_bench_agent.responses_llm import ResponsesLLM
+
+# Import cleanup managers
+from terminal_bench_agent.cleanup_manager import DaytonaCleanupManager, DockerCleanupManager
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Try to import memory system
 try:
@@ -158,6 +166,19 @@ class MemoryGuidedTerminus(Terminus2):
                 self._logger.info("Memory system not available - memory_lib not found")
             else:
                 self._logger.info("Memory system disabled by configuration")
+
+        # Initialize cleanup managers
+        self.daytona_cleanup = None
+        self.docker_cleanup = DockerCleanupManager()
+
+        # Try to initialize Daytona cleanup if available
+        try:
+            if os.environ.get("DAYTONA_API_KEY"):
+                self.daytona_cleanup = DaytonaCleanupManager()
+                self._logger.info("Daytona cleanup manager initialized")
+        except Exception as e:
+            self._logger.warning(f"Could not initialize Daytona cleanup: {e}")
+            self.daytona_cleanup = None
 
     @staticmethod
     def name() -> str:
@@ -340,3 +361,40 @@ Now, continue with your response:"""
         except Exception as e:
             self._logger.warning(f"Code memory retrieval failed: {e}", exc_info=True)
             return ""
+
+    async def cleanup_resources(self):
+        """Clean up all resources (memory, databases, containers).
+
+        This method should be called after task completion to ensure
+        proper cleanup of all resources.
+        """
+        logger.info("Starting Terminus agent resource cleanup...")
+
+        # Close memory system if it exists
+        if self.memory:
+            try:
+                if hasattr(self.memory, 'close'):
+                    self.memory.close()
+                    logger.info("Closed memory system")
+            except Exception as e:
+                logger.warning(f"Failed to close memory system: {e}")
+
+        # Call parent cleanup if available
+        if hasattr(super(), 'cleanup_resources'):
+            try:
+                await super().cleanup_resources()
+                logger.info("Called parent cleanup")
+            except Exception as e:
+                logger.warning(f"Parent cleanup warning: {e}")
+
+        logger.info("Terminus agent resource cleanup completed")
+
+    def __del__(self):
+        """Destructor to ensure cleanup happens."""
+        try:
+            # Close memory system if it exists
+            if hasattr(self, 'memory') and self.memory:
+                if hasattr(self.memory, 'close'):
+                    self.memory.close()
+        except Exception:
+            pass  # Errors in destructor should be silent

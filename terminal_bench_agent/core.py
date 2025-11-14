@@ -18,10 +18,13 @@ try:
 except ImportError:
     HARBOR_AVAILABLE = False
     BaseAgent = object
+    BaseEnvironment = object  # type: ignore
+    AgentContext = object  # type: ignore
 
 from .agent.planner import Planner
 from .agent.executor import Executor
 from .agent.actions import ActionType, Observation
+from .cleanup_manager import DaytonaCleanupManager, DockerCleanupManager
 
 # LiteLLM for model calls (supports both chat completions and responses API)
 try:
@@ -29,6 +32,12 @@ try:
     LITELLM_AVAILABLE = True
 except ImportError:
     LITELLM_AVAILABLE = False
+
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 class MemoryGuidedAgent(BaseAgent if HARBOR_AVAILABLE else object):
@@ -93,6 +102,19 @@ class MemoryGuidedAgent(BaseAgent if HARBOR_AVAILABLE else object):
         self.planner = None
         self.executor = None
         self.environment = None
+
+        # Initialize cleanup managers
+        self.daytona_cleanup = None
+        self.docker_cleanup = DockerCleanupManager()
+
+        # Try to initialize Daytona cleanup if available
+        try:
+            if os.environ.get("DAYTONA_API_KEY"):
+                self.daytona_cleanup = DaytonaCleanupManager()
+                logger.info("Daytona cleanup manager initialized")
+        except Exception as e:
+            logger.warning(f"Could not initialize Daytona cleanup: {e}")
+            self.daytona_cleanup = None
 
     def _create_llm_function(self) -> Callable:
         """Create an async LLM function for the agent.
@@ -182,7 +204,7 @@ class MemoryGuidedAgent(BaseAgent if HARBOR_AVAILABLE else object):
                 # Check timeout
                 elapsed = (datetime.now() - start_time).total_seconds()
                 if elapsed > self.max_time_seconds:
-                    self._log(f"\nTimeout after {elapsed}s\n")
+                    self._log(f"\nTimeout after {elapsed}s - cleaning up resources\n")
                     break
 
                 # Get next action
@@ -257,6 +279,50 @@ class MemoryGuidedAgent(BaseAgent if HARBOR_AVAILABLE else object):
         except Exception as e:
             self._log(f"\nError during execution: {e}\n")
             raise
+        finally:
+            # CRITICAL: Always cleanup resources
+            await self._cleanup_resources()
+
+    async def _cleanup_resources(self):
+        """Clean up all resources (memory, databases, containers).
+
+        This method is called in the finally block to ensure cleanup happens
+        even on timeout or error.
+        """
+        logger.info("Starting resource cleanup...")
+
+        # Close memory system if it exists
+        if self.memory:
+            try:
+                if hasattr(self.memory, 'close'):
+                    self.memory.close()
+                    logger.info("Closed memory system")
+            except Exception as e:
+                logger.warning(f"Failed to close memory system: {e}")
+
+        # Close planner resources if any
+        if self.planner:
+            try:
+                if hasattr(self.planner, 'cleanup'):
+                    await self.planner.cleanup()
+                    logger.info("Cleaned up planner")
+            except Exception as e:
+                logger.warning(f"Failed to cleanup planner: {e}")
+
+        # Note: Harbor environment cleanup is handled by the Harbor framework
+        # We don't directly clean up Docker containers here as Harbor manages them
+        # However, we log that cleanup is delegated
+        logger.info("Environment cleanup delegated to Harbor framework")
+
+        # If we have access to environment metadata, we could trigger cleanup
+        if self.environment and hasattr(self.environment, 'cleanup'):
+            try:
+                await self.environment.cleanup()
+                logger.info("Called environment cleanup")
+            except Exception as e:
+                logger.warning(f"Environment cleanup warning: {e}")
+
+        logger.info("Resource cleanup completed")
 
     def _log(self, message: str):
         """Write to log file.
