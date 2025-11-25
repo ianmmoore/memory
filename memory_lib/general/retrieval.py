@@ -3,13 +3,18 @@
 This module implements an exhaustive reasoning approach where a small language model
 scores the relevance of each memory to the current context, enabling precise
 memory selection.
+
+Optionally supports embedding-based prefiltering to reduce LLM API calls.
 """
 
 import asyncio
 import re
-from typing import Dict, List, Optional, Any, Callable, Awaitable
+from typing import Dict, List, Optional, Any, Callable, Awaitable, TYPE_CHECKING
 from dataclasses import dataclass
 import time
+
+if TYPE_CHECKING:
+    from .prefilter import EmbeddingPrefilter
 
 
 @dataclass
@@ -70,7 +75,9 @@ class MemoryRetrieval:
         max_memories: int = 10,
         batch_size: int = 10,
         retry_attempts: int = 3,
-        retry_delay: float = 1.0
+        retry_delay: float = 1.0,
+        prefilter: Optional["EmbeddingPrefilter"] = None,
+        prefilter_top_k: int = 100
     ):
         """Initialize the retrieval pipeline.
 
@@ -90,6 +97,11 @@ class MemoryRetrieval:
                 Default: 3
             retry_delay: Initial delay in seconds for exponential backoff retries.
                 Default: 1.0
+            prefilter: Optional EmbeddingPrefilter for reducing candidate count
+                before LLM scoring. If provided, only top prefilter_top_k candidates
+                by embedding similarity will be scored.
+            prefilter_top_k: Number of candidates to select via prefiltering before
+                LLM scoring. Only used if prefilter is provided. Default: 100
 
         Raises:
             ValueError: If threshold is not between 0 and 1, or max_memories < 1.
@@ -105,6 +117,8 @@ class MemoryRetrieval:
         self.batch_size = batch_size
         self.retry_attempts = retry_attempts
         self.retry_delay = retry_delay
+        self.prefilter = prefilter
+        self.prefilter_top_k = prefilter_top_k
 
     def _create_scoring_prompt(self, context: str, memory: Dict[str, Any]) -> str:
         """Create a prompt for the small model to score relevance.
@@ -313,19 +327,27 @@ Reason: <brief explanation>"""
     async def retrieve_relevant_memories(
         self,
         context: str,
-        memories: List[Dict[str, Any]]
+        memories: List[Dict[str, Any]],
+        use_prefilter: Optional[bool] = None
     ) -> List[ScoredMemory]:
         """Complete retrieval pipeline: score, filter, and select memories.
 
         This is the main entry point for memory retrieval. It runs the complete
         pipeline:
-        1. Score all memories using the small model (exhaustive reasoning)
-        2. Filter by relevance threshold
-        3. Select top-K memories
+        1. (Optional) Prefilter to top-K candidates by embedding similarity
+        2. Score memories using the small model
+        3. Filter by relevance threshold
+        4. Select top-K memories
+
+        When prefiltering is enabled (and prefilter is configured), only the
+        top prefilter_top_k candidates by embedding similarity are scored,
+        dramatically reducing API costs.
 
         Args:
             context: Current context/task description to score memories against.
             memories: List of all available memory dictionaries.
+            use_prefilter: Whether to use prefiltering. If None, uses prefilter
+                if one is configured. Set to False to force exhaustive scoring.
 
         Returns:
             List of selected ScoredMemory objects, sorted by relevance (highest first).
@@ -348,13 +370,41 @@ Reason: <brief explanation>"""
             >>> len(results) > 0
             True
         """
-        # Step 1: Exhaustive reasoning - score all memories
-        scored_memories = await self.score_all_memories(context, memories)
+        # Determine whether to use prefiltering
+        should_prefilter = use_prefilter if use_prefilter is not None else (self.prefilter is not None)
 
-        # Step 2 & 3: Filter and select top-K
+        # Step 1: Optional prefiltering
+        if should_prefilter and self.prefilter is not None:
+            candidates = await self.prefilter.get_candidates(
+                query=context,
+                memories=memories,
+                top_k=self.prefilter_top_k
+            )
+        else:
+            candidates = memories
+
+        # Step 2: Score candidates (exhaustive over candidates, not all memories)
+        scored_memories = await self.score_all_memories(context, candidates)
+
+        # Step 3 & 4: Filter and select top-K
         selected_memories = self.filter_and_select(scored_memories)
 
         return selected_memories
+
+    def set_prefilter(
+        self,
+        prefilter: Optional["EmbeddingPrefilter"],
+        top_k: Optional[int] = None
+    ) -> None:
+        """Set or update the prefilter configuration.
+
+        Args:
+            prefilter: The EmbeddingPrefilter to use, or None to disable.
+            top_k: Number of candidates to prefilter to. If None, keeps current value.
+        """
+        self.prefilter = prefilter
+        if top_k is not None:
+            self.prefilter_top_k = top_k
 
     def format_memories_for_prompt(
         self,

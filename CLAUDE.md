@@ -1,0 +1,1 @@
+- remember to run all python in micromamba environment named llms

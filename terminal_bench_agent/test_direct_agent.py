@@ -19,7 +19,7 @@ async def test_direct_agent():
             agent = MemoryGuidedTerminus(
                 logs_dir=logs_dir,
                 model_name="gpt-5-codex",
-                enable_memory=False,  # Disable memory for simplicity
+                enable_memory=True,  # Enable memory system
                 temperature=1.0,
                 parser_name="json",
             )

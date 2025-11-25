@@ -273,10 +273,13 @@ def main():
     # Build benchmark command
     import subprocess
 
+    # Format dataset as name@version for harbor
+    dataset_spec = f"{args.dataset}@{args.version}" if hasattr(args, 'version') and args.version else args.dataset
+
     cmd = [
         "harbor", "run",
-        "--agent-import-path", "terminal_bench_agent.core:MemoryGuidedAgent",
-        "--dataset", args.dataset,
+        "--agent-import-path", "terminal_bench_agent.terminus_agent:MemoryGuidedTerminus",
+        "--dataset", dataset_spec,
         "--env", "daytona",  # Use Daytona environment
     ]
 
@@ -292,7 +295,7 @@ def main():
         output_dir = f"./terminal_bench_agent/jobs/{timestamp}"
         cmd.extend(["--jobs-dir", output_dir])
 
-    if args.parallel > 1:
+    if args.parallel >= 1:
         cmd.extend(["--n-concurrent", str(args.parallel)])
 
     # Add model if specified
