@@ -1,6 +1,18 @@
 # Memory System
 
-A comprehensive memory solution with two variants:
+A comprehensive memory solution for AI applications with LLM-based intelligent retrieval.
+
+## Project Components
+
+| Component | Description | Documentation |
+|-----------|-------------|---------------|
+| **memory_lib** | Core memory library with General and Code-specific systems | [API Reference](docs/API_REFERENCE.md) |
+| **halumem_benchmark** | HaluMem benchmark implementation for memory evaluation | [HaluMem README](halumem_benchmark/README.md) |
+| **terminal_bench_agent** | Memory-guided agent for Terminal-Bench tasks | [Agent README](terminal_bench_agent/README.md) |
+
+## Memory Library
+
+The memory library provides two variants:
 
 1. **General Memory System**: Base library for storing and retrieving memories using LLM-based relevance scoring
 2. **Codebase-Specific Memory System**: Specialized version for code intelligence with indexing, caching, and optimization
@@ -400,6 +412,55 @@ Easily extendable for additional languages.
 - Increase batch_size for more parallelism
 - Reduce number of memories
 - Check network/API latency
+
+## Benchmarks
+
+### HaluMem Benchmark
+
+The HaluMem benchmark (arXiv:2511.03506) evaluates memory systems on:
+- **Extraction**: How well memories are extracted from conversations
+- **Updating**: How conflicts are resolved when information changes
+- **Question Answering**: End-to-end QA correctness
+
+```bash
+# Run dry run to validate setup
+cd halumem_benchmark
+python run.py --dry-run
+
+# Run full benchmark (requires OPENAI_API_KEY)
+python run.py --variant long --sample-size 100
+```
+
+See [halumem_benchmark/README.md](halumem_benchmark/README.md) for details.
+
+### Terminal-Bench Agent
+
+A memory-guided agent for Terminal-Bench tasks using plan-execute-observe loop:
+
+```bash
+# Run single task
+cd terminal_bench_agent
+python scripts/run_benchmark.py --tasks example_task_001
+
+# Run full benchmark
+python scripts/run_benchmark.py --dataset terminal-bench-core
+```
+
+Performance: **42.5%** accuracy (#4 overall, #1 open-source).
+
+See [terminal_bench_agent/README.md](terminal_bench_agent/README.md) for details.
+
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [Overview](docs/00_OVERVIEW.md) | Executive summary |
+| [Architecture](docs/01_ARCHITECTURE.md) | System design |
+| [Components](docs/02_COMPONENTS.md) | Component specifications |
+| [API Reference](docs/API_REFERENCE.md) | Complete API documentation |
+| [Public API Guide](docs/PUBLIC_API.md) | Customer integration guide |
+| [Quick Start](docs/QUICKSTART.md) | Step-by-step tutorials |
+| [Internal](docs/INTERNAL.md) | Implementation details (internal) |
 
 ## Future Enhancements
 

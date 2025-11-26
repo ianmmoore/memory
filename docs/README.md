@@ -52,6 +52,13 @@ This documentation is organized by audience and abstraction level:
 - Error handling
 - **The main reference for library users**
 
+📖 **[Public API Guide](PUBLIC_API.md)** ⭐ *Customer-Focused Integration Guide*
+- Simplified integration guide
+- Quick start examples
+- Cost estimation
+- Best practices
+- **For customers integrating the library**
+
 #### Internal Teams / Maintainers
 
 🔒 **[Internal Implementation](INTERNAL.md)** ⚠️ *CONFIDENTIAL - Internal Use Only*
@@ -62,6 +69,20 @@ This documentation is organized by audience and abstraction level:
 - Future roadmap
 - Debugging guide
 - **For internal development teams only**
+
+### Related Projects
+
+🧪 **[HaluMem Benchmark](../halumem_benchmark/README.md)**
+- Memory system evaluation suite
+- Extraction, updating, and QA metrics
+- HaluMem-Medium and HaluMem-Long variants
+- Cost-optimized with prefiltering
+
+🤖 **[Terminal-Bench Agent](../terminal_bench_agent/README.md)**
+- Memory-guided agent for command-line tasks
+- Plan-execute-observe architecture
+- Harbor BaseAgent integration
+- Cleanup management for Daytona/Docker
 
 ## Quick Navigation
 
