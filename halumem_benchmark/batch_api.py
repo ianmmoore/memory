@@ -55,18 +55,19 @@ class BatchProcessor:
         self,
         custom_id: str,
         model: str,
-        messages: List[Dict[str, str]],
-        temperature: float = 0.7
+        messages: List[Dict[str, str]]
     ) -> Dict[str, Any]:
-        """Create a single batch request in JSONL format."""
+        """Create a single batch request in JSONL format.
+
+        Note: Temperature is not included as gpt-5-nano only supports default (1).
+        """
         return {
             "custom_id": custom_id,
             "method": "POST",
             "url": "/v1/chat/completions",
             "body": {
                 "model": model,
-                "messages": messages,
-                "temperature": temperature
+                "messages": messages
             }
         }
 
@@ -281,8 +282,7 @@ MEMORIES (one per line):"""
             requests.append(self.processor._create_batch_request(
                 custom_id=f"extract_{i}",
                 model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.7
+                messages=[{"role": "user", "content": prompt}]
             ))
 
         logger.info(f"Submitting extraction batch with {len(requests)} requests")
@@ -340,8 +340,7 @@ REASONING: <brief explanation>"""
             requests.append(self.processor._create_batch_request(
                 custom_id=f"update_{scenario.scenario_id}",
                 model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.0
+                messages=[{"role": "user", "content": prompt}]
             ))
 
         logger.info(f"Submitting update batch with {len(requests)} requests")
@@ -410,8 +409,7 @@ ANSWER:"""
             answer_requests.append(self.processor._create_batch_request(
                 custom_id=f"answer_{qa.qa_id}",
                 model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.7
+                messages=[{"role": "user", "content": prompt}]
             ))
 
         logger.info(f"Submitting QA answer batch with {len(answer_requests)} requests")
@@ -447,8 +445,7 @@ REASONING: <brief explanation>"""
             judge_requests.append(self.processor._create_batch_request(
                 custom_id=f"judge_{qa.qa_id}",
                 model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.0
+                messages=[{"role": "user", "content": prompt}]
             ))
 
         logger.info(f"Submitting QA judge batch with {len(judge_requests)} requests")

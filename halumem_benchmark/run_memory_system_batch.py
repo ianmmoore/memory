@@ -45,8 +45,8 @@ logger = logging.getLogger(__name__)
 # Token limit for batch API (leaving buffer under 900K limit)
 MAX_BATCH_TOKENS = 800000
 
-# gpt-5-nano is cheaper, can use larger chunks
-MAX_NANO_BATCH_TOKENS = 800000
+# gpt-5-nano is cheaper, can use larger chunks (up to 2M tokens per batch)
+MAX_NANO_BATCH_TOKENS = 2_000_000
 
 
 def create_scoring_prompt(context: str, memory_text: str, metadata: dict = None) -> str:
@@ -87,6 +87,9 @@ async def batch_score_memories(
 ) -> Dict[str, List[Dict[str, Any]]]:
     """Batch score memories for multiple queries using gpt-5-nano.
 
+    Memory-efficient version that builds chunks incrementally and saves
+    request map to disk to avoid OOM with large request counts.
+
     Args:
         batch_processor: BatchProcessor instance
         queries_and_memories: List of {"query_id": str, "query": str, "memories": [{"id", "text", "metadata"}]}
@@ -99,62 +102,133 @@ async def batch_score_memories(
     Returns:
         Dict mapping query_id to list of scored memories
     """
-    # Build all scoring requests
-    scoring_requests = []
-    request_map = {}  # custom_id -> (query_id, memory_id)
+    import gc
 
-    for item in queries_and_memories:
-        query_id = item["query_id"]
-        query = item["query"]
+    # Save request_map to disk incrementally to avoid OOM
+    request_map_file = run_dir / f"{state_key}_request_map.jsonl"
+    chunks_dir = run_dir / f"{state_key}_chunks"
+    chunks_dir.mkdir(exist_ok=True)
 
-        for mem in item["memories"]:
-            custom_id = f"score_{query_id}_{mem['id']}"
-            prompt = create_scoring_prompt(query, mem["text"], mem.get("metadata"))
+    # Check if chunks already exist (resume case)
+    existing_chunks = sorted(chunks_dir.glob("chunk_*.json"))
 
-            # Note: gpt-5-nano only supports temperature=1 (default), cannot use 0
-            scoring_requests.append(batch_processor._create_batch_request(
-                custom_id=custom_id,
-                model="gpt-5-nano",
-                messages=[{"role": "user", "content": prompt}]
-            ))
-            request_map[custom_id] = (query_id, mem["id"], mem["text"], mem.get("metadata", {}))
+    if not existing_chunks:
+        # Build chunks incrementally, writing to disk
+        logger.info("Building scoring request chunks (memory-efficient mode)...")
 
-    if not scoring_requests:
+        current_chunk = []
+        current_tokens = 0
+        chunk_idx = 0
+        total_requests = 0
+
+        # Open request_map file for appending
+        with open(request_map_file, 'w') as map_file:
+            for item in queries_and_memories:
+                query_id = item["query_id"]
+                query = item["query"]
+
+                for mem in item["memories"]:
+                    custom_id = f"score_{query_id}_{mem['id']}"
+                    prompt = create_scoring_prompt(query, mem["text"], mem.get("metadata"))
+
+                    # Note: gpt-5-nano only supports temperature=1 (default), cannot use 0
+                    req = batch_processor._create_batch_request(
+                        custom_id=custom_id,
+                        model="gpt-5-nano",
+                        messages=[{"role": "user", "content": prompt}]
+                    )
+
+                    # Save mapping to disk
+                    map_entry = {
+                        "custom_id": custom_id,
+                        "query_id": query_id,
+                        "mem_id": mem["id"],
+                        "mem_text": mem["text"],
+                        "mem_metadata": mem.get("metadata", {})
+                    }
+                    map_file.write(json.dumps(map_entry) + "\n")
+
+                    # Estimate tokens
+                    req_tokens = estimate_tokens(json.dumps(req))
+
+                    # Check if we need to start a new chunk
+                    if current_tokens + req_tokens > MAX_NANO_BATCH_TOKENS and current_chunk:
+                        # Save current chunk to disk
+                        chunk_file = chunks_dir / f"chunk_{chunk_idx:05d}.json"
+                        with open(chunk_file, 'w') as f:
+                            json.dump(current_chunk, f)
+                        chunk_idx += 1
+                        current_chunk = []
+                        current_tokens = 0
+
+                        # Force garbage collection periodically
+                        if chunk_idx % 100 == 0:
+                            gc.collect()
+                            logger.info(f"Built {chunk_idx} chunks, {total_requests} requests so far...")
+
+                    current_chunk.append(req)
+                    current_tokens += req_tokens
+                    total_requests += 1
+
+            # Save final chunk
+            if current_chunk:
+                chunk_file = chunks_dir / f"chunk_{chunk_idx:05d}.json"
+                with open(chunk_file, 'w') as f:
+                    json.dump(current_chunk, f)
+                chunk_idx += 1
+
+        logger.info(f"Split {total_requests} requests into {chunk_idx} chunks (saved to disk)")
+        gc.collect()
+
+        # Reload chunk list
+        existing_chunks = sorted(chunks_dir.glob("chunk_*.json"))
+    else:
+        logger.info(f"Found {len(existing_chunks)} existing chunk files, resuming...")
+
+    if not existing_chunks:
         return {}
 
-    # Chunk and process
-    scoring_chunks = chunk_requests(scoring_requests, MAX_NANO_BATCH_TOKENS)
-    logger.info(f"Processing {len(scoring_requests)} scoring requests in {len(scoring_chunks)} chunks")
+    # Process chunks using disk-based mode (memory-efficient)
+    logger.info(f"Processing {len(existing_chunks)} scoring request chunks (disk-based mode)")
 
     scoring_responses = await process_chunked_batch(
         batch_processor=batch_processor,
-        chunks=scoring_chunks,
+        chunks=[],  # Empty - will load from chunks_dir
         description="Relevance scoring - gpt-5-nano",
         state=state,
         state_key=state_key,
-        run_dir=run_dir
+        run_dir=run_dir,
+        chunks_dir=chunks_dir  # Load chunks from disk on demand
     )
 
-    # Parse scores and group by query
+    gc.collect()
+
+    # Parse scores and group by query - load request_map from disk
+    logger.info("Parsing scoring responses...")
     query_scores = {}  # query_id -> [(score, memory_dict)]
 
-    for custom_id, response in scoring_responses.items():
-        if custom_id not in request_map:
-            continue
+    with open(request_map_file) as f:
+        for line in f:
+            entry = json.loads(line)
+            custom_id = entry["custom_id"]
 
-        query_id, mem_id, mem_text, mem_metadata = request_map[custom_id]
-        score = parse_score_response(response)
+            if custom_id not in scoring_responses:
+                continue
 
-        if query_id not in query_scores:
-            query_scores[query_id] = []
+            response = scoring_responses[custom_id]
+            score = parse_score_response(response)
 
-        if score >= threshold:
-            query_scores[query_id].append({
-                "memory_id": mem_id,
-                "text": mem_text,
-                "metadata": mem_metadata,
-                "score": score
-            })
+            query_id = entry["query_id"]
+            if query_id not in query_scores:
+                query_scores[query_id] = []
+
+            if score >= threshold:
+                query_scores[query_id].append({
+                    "memory_id": entry["mem_id"],
+                    "text": entry["mem_text"],
+                    "metadata": entry["mem_metadata"],
+                    "score": score
+                })
 
     # Sort by score and limit per query
     results = {}
@@ -362,27 +436,45 @@ async def process_chunked_batch(
     description: str,
     state: Dict[str, Any],
     state_key: str,
-    run_dir: Path
+    run_dir: Path,
+    chunks_dir: Path = None
 ) -> Dict[str, str]:
     """Process multiple chunks sequentially, with resume support.
 
     Args:
         batch_processor: BatchProcessor instance
-        chunks: List of request chunks
+        chunks: List of request chunks (can be empty if chunks_dir provided)
         description: Description for batch jobs
         state: Current state dict
         state_key: Key in state for tracking this batch set (e.g., 'extraction_chunks')
         run_dir: Directory for saving state
+        chunks_dir: Optional directory containing chunk_*.json files (memory-efficient mode)
 
     Returns:
         Combined results from all chunks
     """
+    # Determine chunk count and how to load chunks
+    if chunks_dir and chunks_dir.exists():
+        # Memory-efficient mode: load chunks from disk on demand
+        chunk_files = sorted(chunks_dir.glob("chunk_*.json"))
+        num_chunks = len(chunk_files)
+
+        def get_chunk(idx):
+            with open(chunk_files[idx]) as f:
+                return json.load(f)
+    else:
+        # In-memory mode: chunks already loaded
+        num_chunks = len(chunks)
+
+        def get_chunk(idx):
+            return chunks[idx]
+
     # Initialize chunk tracking if not present or if length doesn't match
     # (handles case where state was reset to [] but new chunks were created)
-    if state_key not in state or len(state.get(state_key, [])) != len(chunks):
+    if state_key not in state or len(state.get(state_key, [])) != num_chunks:
         state[state_key] = [
             {"chunk_idx": i, "batch_id": None, "status": "pending"}
-            for i in range(len(chunks))
+            for i in range(num_chunks)
         ]
         save_state(run_dir, state)
 
@@ -396,24 +488,30 @@ async def process_chunked_batch(
             all_results = json.load(f)
         logger.info(f"Loaded {len(all_results)} partial results from previous run")
 
-    for i, chunk in enumerate(chunks):
+    for i in range(num_chunks):
         chunk_state = chunk_states[i]
 
         if chunk_state["status"] == "completed":
-            logger.info(f"Chunk {i+1}/{len(chunks)} already completed, skipping")
+            logger.info(f"Chunk {i+1}/{num_chunks} already completed, skipping")
             continue
 
         if chunk_state["batch_id"] and chunk_state["status"] == "in_progress":
             # Resume polling existing batch
-            logger.info(f"Resuming chunk {i+1}/{len(chunks)}: {chunk_state['batch_id']}")
+            logger.info(f"Resuming chunk {i+1}/{num_chunks}: {chunk_state['batch_id']}")
             batch_id = chunk_state["batch_id"]
         else:
+            # Load chunk from disk or memory
+            chunk = get_chunk(i)
+
             # Submit new batch
-            logger.info(f"Submitting chunk {i+1}/{len(chunks)} ({len(chunk)} requests)...")
+            logger.info(f"Submitting chunk {i+1}/{num_chunks} ({len(chunk)} requests)...")
             batch = await batch_processor.submit_batch(
-                chunk, f"{description} - chunk {i+1}/{len(chunks)}"
+                chunk, f"{description} - chunk {i+1}/{num_chunks}"
             )
             batch_id = batch.batch_id
+
+            # Clear chunk from memory
+            del chunk
 
             # Update state
             chunk_state["batch_id"] = batch_id
@@ -422,7 +520,7 @@ async def process_chunked_batch(
             logger.info(f"Chunk {i+1} submitted as {batch_id}. Safe to exit - will resume.")
 
         # Wait for completion
-        logger.info(f"Waiting for chunk {i+1}/{len(chunks)} ({batch_id})...")
+        logger.info(f"Waiting for chunk {i+1}/{num_chunks} ({batch_id})...")
         chunk_results = await batch_processor.wait_for_completion(batch_id)
 
         # Merge results
@@ -435,7 +533,7 @@ async def process_chunked_batch(
         with open(partial_results_file, 'w') as f:
             json.dump(all_results, f)
 
-        logger.info(f"Chunk {i+1}/{len(chunks)} complete. Total results: {len(all_results)}")
+        logger.info(f"Chunk {i+1}/{num_chunks} complete. Total results: {len(all_results)}")
 
     return all_results
 
@@ -633,8 +731,7 @@ MEMORIES (one per line):"""
             extraction_requests.append(batch_processor._create_batch_request(
                 custom_id=f"extract_{i}",
                 model="gpt-5.1",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.7
+                messages=[{"role": "user", "content": prompt}]
             ))
 
         # Chunk requests to fit under token limit
@@ -785,7 +882,7 @@ MEMORIES (one per line):"""
             ]
 
             # Step 1a: Embedding prefilter to get top candidates per scenario
-            prefilter_top_k = max(100, int(mem_count * 0.1))  # top 10% or 100
+            prefilter_top_k = min(100, int(mem_count * 0.1))  # top 10% or 100, whichever is smaller
             logger.info(f"Prefiltering to top {prefilter_top_k} candidates per scenario...")
 
             prefilter_candidates = await bulk_embedding_prefilter(
@@ -857,8 +954,7 @@ REASONING: <brief explanation>"""
             update_requests.append(batch_processor._create_batch_request(
                 custom_id=f"update_{scenario.scenario_id}",
                 model="gpt-5.1",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.0
+                messages=[{"role": "user", "content": prompt}]
             ))
 
         if update_requests:
@@ -988,7 +1084,7 @@ REASONING: <brief explanation>"""
             ]
 
             # Step 1a: Embedding prefilter to get top candidates per question
-            prefilter_top_k = max(100, int(mem_count * 0.1))  # top 10% or 100
+            prefilter_top_k = min(100, int(mem_count * 0.1))  # top 10% or 100, whichever is smaller
             logger.info(f"Prefiltering to top {prefilter_top_k} candidates per question...")
 
             prefilter_candidates = await bulk_embedding_prefilter(
@@ -1058,8 +1154,7 @@ ANSWER:"""
                 answer_requests.append(batch_processor._create_batch_request(
                     custom_id=f"answer_{qa.qa_id}",
                     model="gpt-5.1",
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.7
+                    messages=[{"role": "user", "content": prompt}]
                 ))
 
             # Chunk answer requests
@@ -1109,8 +1204,7 @@ REASONING: <brief explanation>"""
             judge_requests.append(batch_processor._create_batch_request(
                 custom_id=f"judge_{qa.qa_id}",
                 model="gpt-5.1",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.0
+                messages=[{"role": "user", "content": prompt}]
             ))
 
         # Chunk judge requests

@@ -66,3 +66,7 @@ jobs/
 tmp/
 temp/
 *.tmp
+
+# Benchmark data and results
+data/
+results/
