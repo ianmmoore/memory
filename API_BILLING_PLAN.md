@@ -232,9 +232,367 @@ All API calls logged with:
 
 ## 3. Billing & Usage System
 
-### 3.1 Pricing Model
+### 3.1 Extensible Pricing Architecture
 
-#### Usage-Based Pricing
+The pricing system is **fully configuration-driven** to allow easy modifications without code changes.
+
+#### Pricing Configuration Schema
+
+```yaml
+# pricing_config.yaml - All pricing defined in config, not code
+pricing_version: "2024-01"
+effective_date: "2024-01-01"
+
+# Define billable metrics (extensible)
+metrics:
+  api_calls:
+    display_name: "API Calls"
+    unit: "calls"
+    aggregation: "sum"
+
+  tokens_processed:
+    display_name: "Tokens Processed"
+    unit: "tokens"
+    aggregation: "sum"
+
+  memories_stored:
+    display_name: "Memories Stored"
+    unit: "memories"
+    aggregation: "max"  # Peak storage
+
+  embeddings_generated:
+    display_name: "Embeddings"
+    unit: "embeddings"
+    aggregation: "sum"
+
+  # Easy to add new metrics:
+  gpu_seconds:
+    display_name: "GPU Compute"
+    unit: "seconds"
+    aggregation: "sum"
+
+# Define plans (add/modify without code changes)
+plans:
+  free:
+    display_name: "Free"
+    base_price: 0
+    limits:
+      api_calls: 100
+      tokens_processed: 10000
+      memories_stored: 100
+      embeddings_generated: 100
+    rate_limits:
+      requests_per_minute: 10
+      requests_per_day: 100
+    features:
+      - basic_retrieval
+    overage_allowed: false
+
+  starter:
+    display_name: "Starter"
+    base_price: 49
+    limits:
+      api_calls: 10000
+      tokens_processed: 1000000
+      memories_stored: 10000
+      embeddings_generated: 10000
+    rate_limits:
+      requests_per_minute: 60
+      requests_per_day: 5000
+    features:
+      - basic_retrieval
+      - batch_operations
+      - usage_dashboard
+    overage:
+      api_calls: { price: 0.50, per: 1000 }
+      tokens_processed: { price: 5.00, per: 1000000 }
+
+  professional:
+    display_name: "Professional"
+    base_price: 299
+    limits:
+      api_calls: 100000
+      tokens_processed: 20000000
+      memories_stored: 100000
+      embeddings_generated: 100000
+    rate_limits:
+      requests_per_minute: 300
+      requests_per_day: 50000
+    features:
+      - basic_retrieval
+      - batch_operations
+      - usage_dashboard
+      - priority_support
+      - webhooks
+      - custom_models
+    overage:
+      api_calls: { price: 0.30, per: 1000 }
+      tokens_processed: { price: 3.00, per: 1000000 }
+
+  enterprise:
+    display_name: "Enterprise"
+    base_price: custom  # Negotiated
+    limits: custom
+    features:
+      - all
+      - dedicated_infrastructure
+      - sla_guarantee
+      - custom_integrations
+
+# Add-ons (optional paid features)
+addons:
+  priority_queue:
+    display_name: "Priority Processing"
+    price: 50
+    billing: monthly
+    description: "Requests processed with higher priority"
+
+  extended_retention:
+    display_name: "Extended Data Retention"
+    price: 25
+    billing: monthly
+    per_unit: 10000  # memories
+    description: "Keep memories beyond 90 days"
+
+  dedicated_embedding_model:
+    display_name: "Dedicated Embedding Model"
+    price: 200
+    billing: monthly
+    description: "Custom fine-tuned embedding model"
+
+# Volume discounts (automatic)
+volume_discounts:
+  api_calls:
+    - { threshold: 100000, discount: 0.10 }
+    - { threshold: 500000, discount: 0.20 }
+    - { threshold: 1000000, discount: 0.30 }
+  tokens_processed:
+    - { threshold: 10000000, discount: 0.10 }
+    - { threshold: 50000000, discount: 0.20 }
+
+# Promotional pricing
+promotions:
+  startup_program:
+    type: "credit"
+    amount: 500
+    eligibility: "YC/TechStars companies"
+    duration_months: 12
+
+  annual_discount:
+    type: "percentage"
+    discount: 0.20
+    condition: "annual_commitment"
+```
+
+#### Database Schema for Pricing
+
+```sql
+-- Plans are config-driven, stored in DB for runtime
+CREATE TABLE pricing_plans (
+    id VARCHAR(50) PRIMARY KEY,
+    version VARCHAR(20) NOT NULL,
+    display_name VARCHAR(100),
+    base_price_cents INT,  -- NULL for custom/enterprise
+    config JSONB NOT NULL,  -- Full plan config
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMP DEFAULT NOW(),
+    effective_from DATE NOT NULL,
+    effective_until DATE  -- NULL = no end date
+);
+
+-- Customer-specific pricing overrides
+CREATE TABLE customer_pricing (
+    org_id VARCHAR(50) PRIMARY KEY,
+    base_plan_id VARCHAR(50) REFERENCES pricing_plans(id),
+    custom_limits JSONB,  -- Override specific limits
+    custom_rates JSONB,   -- Custom overage rates
+    discount_percent DECIMAL(5,2),
+    negotiated_price_cents INT,
+    contract_start DATE,
+    contract_end DATE,
+    notes TEXT
+);
+
+-- Price history for grandfathering
+CREATE TABLE price_history (
+    id SERIAL PRIMARY KEY,
+    org_id VARCHAR(50),
+    plan_id VARCHAR(50),
+    effective_from DATE,
+    effective_until DATE,
+    locked_config JSONB,  -- Snapshot of pricing at signup
+    reason VARCHAR(100)   -- 'signup', 'upgrade', 'grandfathered'
+);
+
+-- Add-on subscriptions
+CREATE TABLE customer_addons (
+    org_id VARCHAR(50),
+    addon_id VARCHAR(50),
+    quantity INT DEFAULT 1,
+    activated_at TIMESTAMP,
+    price_cents_override INT,  -- NULL = use default
+    PRIMARY KEY (org_id, addon_id)
+);
+
+-- Promotional credits
+CREATE TABLE customer_credits (
+    id SERIAL PRIMARY KEY,
+    org_id VARCHAR(50),
+    credit_cents INT,
+    remaining_cents INT,
+    source VARCHAR(50),  -- 'promotion', 'refund', 'manual'
+    expires_at DATE,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+```
+
+#### Pricing Service Implementation
+
+```python
+class PricingService:
+    """Fully extensible pricing engine."""
+
+    def __init__(self, config_path: str = "pricing_config.yaml"):
+        self.config = self._load_config(config_path)
+
+    async def get_effective_pricing(self, org_id: str) -> EffectivePricing:
+        """Get pricing for org, including custom overrides."""
+        base_plan = await self._get_base_plan(org_id)
+        custom = await self._get_custom_pricing(org_id)
+        addons = await self._get_active_addons(org_id)
+        credits = await self._get_available_credits(org_id)
+
+        return EffectivePricing(
+            plan=base_plan,
+            limits=self._merge_limits(base_plan.limits, custom.custom_limits),
+            rates=self._merge_rates(base_plan.overage, custom.custom_rates),
+            discount=custom.discount_percent,
+            addons=addons,
+            credits=credits
+        )
+
+    async def calculate_invoice(
+        self,
+        org_id: str,
+        usage: UsageSummary,
+        period: BillingPeriod
+    ) -> Invoice:
+        """Calculate invoice with all pricing rules applied."""
+        pricing = await self.get_effective_pricing(org_id)
+
+        line_items = []
+
+        # Base subscription
+        line_items.append(LineItem(
+            description=f"{pricing.plan.display_name} Plan",
+            amount=pricing.plan.base_price
+        ))
+
+        # Overage charges
+        for metric, amount in usage.items():
+            if amount > pricing.limits.get(metric, 0):
+                overage = amount - pricing.limits[metric]
+                rate = pricing.rates.get(metric)
+                if rate:
+                    charge = (overage / rate['per']) * rate['price']
+                    # Apply volume discount
+                    discount = self._get_volume_discount(metric, amount)
+                    charge *= (1 - discount)
+                    line_items.append(LineItem(
+                        description=f"{metric} overage ({overage:,} units)",
+                        amount=charge,
+                        discount=discount
+                    ))
+
+        # Add-ons
+        for addon in pricing.addons:
+            line_items.append(LineItem(
+                description=addon.display_name,
+                amount=addon.price * addon.quantity
+            ))
+
+        # Apply credits
+        subtotal = sum(item.amount for item in line_items)
+        credits_applied = min(pricing.credits, subtotal)
+
+        return Invoice(
+            org_id=org_id,
+            period=period,
+            line_items=line_items,
+            subtotal=subtotal,
+            credits_applied=credits_applied,
+            discount_percent=pricing.discount,
+            total=subtotal * (1 - pricing.discount) - credits_applied
+        )
+
+    # Admin functions to modify pricing without code deployment
+    async def create_plan(self, plan_config: dict) -> str:
+        """Create new pricing plan via admin API."""
+        pass
+
+    async def update_plan(self, plan_id: str, updates: dict) -> None:
+        """Update existing plan (creates new version)."""
+        pass
+
+    async def set_custom_pricing(
+        self,
+        org_id: str,
+        custom_limits: dict = None,
+        custom_rates: dict = None,
+        discount: float = None
+    ) -> None:
+        """Set customer-specific pricing overrides."""
+        pass
+
+    async def apply_promotion(self, org_id: str, promo_code: str) -> None:
+        """Apply promotional pricing/credits."""
+        pass
+
+    async def grandfather_pricing(self, org_id: str, until: date) -> None:
+        """Lock current pricing for customer until date."""
+        pass
+```
+
+#### Admin API for Pricing Management
+
+```
+# Pricing management endpoints (admin only)
+GET    /admin/pricing/plans              # List all plans
+POST   /admin/pricing/plans              # Create new plan
+PUT    /admin/pricing/plans/{id}         # Update plan
+DELETE /admin/pricing/plans/{id}         # Deprecate plan
+
+GET    /admin/pricing/metrics            # List billable metrics
+POST   /admin/pricing/metrics            # Add new metric
+
+GET    /admin/pricing/addons             # List add-ons
+POST   /admin/pricing/addons             # Create add-on
+
+# Customer-specific pricing
+GET    /admin/customers/{org}/pricing    # Get customer pricing
+PUT    /admin/customers/{org}/pricing    # Set custom pricing
+POST   /admin/customers/{org}/credits    # Add credits
+POST   /admin/customers/{org}/promotion  # Apply promotion
+```
+
+#### Pricing Extensibility Features
+
+| Feature | How It Works |
+|---------|--------------|
+| **Add new metric** | Add to config YAML, deploy. No code changes. |
+| **Create new plan** | Admin API or config. Instant activation. |
+| **Custom enterprise pricing** | Per-customer overrides in DB |
+| **Volume discounts** | Automatic based on config thresholds |
+| **Promotional pricing** | Credit system with expiration |
+| **Grandfathering** | Lock pricing snapshot per customer |
+| **Geographic pricing** | Add region field to plan config |
+| **A/B test pricing** | Route customers to different plan versions |
+| **Add-ons** | Modular features customers can enable |
+| **Usage credits** | Prepaid balance that depletes |
+
+---
+
+### 3.2 Default Pricing Tiers
 
 | Resource | Unit | Free | Starter | Pro | Enterprise |
 |----------|------|------|---------|-----|------------|
