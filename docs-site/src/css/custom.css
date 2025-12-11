@@ -1,0 +1,108 @@
+/**
+ * Memory API Documentation - Custom Styles
+ */
+
+/* Brand colors */
+:root {
+  --ifm-color-primary: #6366f1;
+  --ifm-color-primary-dark: #4f46e5;
+  --ifm-color-primary-darker: #4338ca;
+  --ifm-color-primary-darkest: #3730a3;
+  --ifm-color-primary-light: #818cf8;
+  --ifm-color-primary-lighter: #a5b4fc;
+  --ifm-color-primary-lightest: #c7d2fe;
+  --ifm-code-font-size: 95%;
+  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.1);
+}
+
+/* Dark mode colors */
+[data-theme='dark'] {
+  --ifm-color-primary: #818cf8;
+  --ifm-color-primary-dark: #6366f1;
+  --ifm-color-primary-darker: #4f46e5;
+  --ifm-color-primary-darkest: #4338ca;
+  --ifm-color-primary-light: #a5b4fc;
+  --ifm-color-primary-lighter: #c7d2fe;
+  --ifm-color-primary-lightest: #e0e7ff;
+  --docusaurus-highlighted-code-line-bg: rgba(0, 0, 0, 0.3);
+}
+
+/* Code blocks */
+.prism-code {
+  font-size: 14px;
+}
+
+/* API endpoint styling */
+.markdown h2 code,
+.markdown h3 code {
+  font-size: 0.9em;
+  padding: 0.2em 0.4em;
+  background-color: var(--ifm-color-primary-lightest);
+  border-radius: 4px;
+}
+
+[data-theme='dark'] .markdown h2 code,
+[data-theme='dark'] .markdown h3 code {
+  background-color: var(--ifm-color-primary-darkest);
+}
+
+/* HTTP method badges */
+.badge--get {
+  background-color: #22c55e;
+}
+
+.badge--post {
+  background-color: #3b82f6;
+}
+
+.badge--put {
+  background-color: #f59e0b;
+}
+
+.badge--delete {
+  background-color: #ef4444;
+}
+
+/* Tables */
+table {
+  display: table;
+  width: 100%;
+}
+
+table th {
+  background-color: var(--ifm-background-surface-color);
+}
+
+/* Cards for landing page */
+.card {
+  border: 1px solid var(--ifm-color-emphasis-200);
+  border-radius: 8px;
+  padding: 1rem;
+  transition: box-shadow 0.2s;
+}
+
+.card:hover {
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+/* Better admonitions */
+.admonition {
+  border-radius: 8px;
+}
+
+/* Footer links */
+.footer__link-item:hover {
+  color: var(--ifm-color-primary);
+}
+
+/* Navbar styling */
+.navbar__title {
+  font-weight: 700;
+}
+
+/* Mobile improvements */
+@media (max-width: 996px) {
+  .markdown table {
+    font-size: 14px;
+  }
+}
