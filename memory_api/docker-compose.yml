@@ -1,0 +1,109 @@
+# =============================================================================
+# Memory API Docker Compose
+# =============================================================================
+# Development environment with all dependencies
+# =============================================================================
+
+version: '3.8'
+
+services:
+  # ---------------------------------------------------------------------------
+  # API Service
+  # ---------------------------------------------------------------------------
+  api:
+    build:
+      context: .
+      target: development
+    ports:
+      - "8000:8000"
+    environment:
+      - ENVIRONMENT=development
+      - DEBUG=true
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/memory_api
+      - REDIS_URL=redis://redis:6379/0
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - LOG_LEVEL=DEBUG
+      - LOG_FORMAT=console
+    volumes:
+      - .:/app
+      - ../memory_lib:/app/memory_lib:ro  # Mount core memory system
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL Database
+  # ---------------------------------------------------------------------------
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: memory_api
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Redis Cache
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Database Admin (optional, for development)
+  # ---------------------------------------------------------------------------
+  adminer:
+    image: adminer
+    ports:
+      - "8080:8080"
+    depends_on:
+      - db
+    profiles:
+      - tools
+
+  # ---------------------------------------------------------------------------
+  # Redis Admin (optional, for development)
+  # ---------------------------------------------------------------------------
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    environment:
+      - REDIS_HOSTS=local:redis:6379
+    ports:
+      - "8081:8081"
+    depends_on:
+      - redis
+    profiles:
+      - tools
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  default:
+    name: memory_api_network

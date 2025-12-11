@@ -1,0 +1,248 @@
+# =============================================================================
+# Memory API Pricing Configuration
+# =============================================================================
+# This file defines all pricing plans, metrics, and billing rules.
+# Changes here take effect without code deployment (reload config).
+# =============================================================================
+
+pricing_version: "2024-01"
+effective_date: "2024-01-01"
+
+# =============================================================================
+# Billable Metrics
+# =============================================================================
+# Define what we track and charge for. Add new metrics here as needed.
+metrics:
+  api_calls:
+    display_name: "API Calls"
+    unit: "calls"
+    aggregation: "sum"
+    description: "Total API requests made"
+
+  tokens_processed:
+    display_name: "Tokens Processed"
+    unit: "tokens"
+    aggregation: "sum"
+    description: "LLM tokens consumed (input + output)"
+
+  memories_stored:
+    display_name: "Memories Stored"
+    unit: "memories"
+    aggregation: "max"
+    description: "Peak memory count during billing period"
+
+  embeddings_generated:
+    display_name: "Embeddings Generated"
+    unit: "embeddings"
+    aggregation: "sum"
+    description: "Number of embedding vectors created"
+
+  queries_executed:
+    display_name: "Queries Executed"
+    unit: "queries"
+    aggregation: "sum"
+    description: "Memory retrieval queries"
+
+# =============================================================================
+# Pricing Plans
+# =============================================================================
+plans:
+  free:
+    display_name: "Free"
+    description: "For testing and small projects"
+    base_price_cents: 0
+    billing_period: "monthly"
+    limits:
+      api_calls: 100
+      tokens_processed: 10000
+      memories_stored: 100
+      embeddings_generated: 100
+      queries_executed: 50
+    rate_limits:
+      requests_per_minute: 10
+      requests_per_day: 100
+      concurrent_requests: 2
+    features:
+      - basic_retrieval
+      - api_dashboard
+    overage_allowed: false
+    trial_days: 0
+
+  starter:
+    display_name: "Starter"
+    description: "For growing applications"
+    base_price_cents: 4900  # $49
+    billing_period: "monthly"
+    limits:
+      api_calls: 10000
+      tokens_processed: 1000000
+      memories_stored: 10000
+      embeddings_generated: 10000
+      queries_executed: 5000
+    rate_limits:
+      requests_per_minute: 60
+      requests_per_day: 5000
+      concurrent_requests: 5
+    features:
+      - basic_retrieval
+      - batch_operations
+      - usage_dashboard
+      - email_support
+    overage_allowed: true
+    overage_rates:
+      api_calls:
+        price_cents: 50  # $0.50 per 1000
+        per_units: 1000
+      tokens_processed:
+        price_cents: 500  # $5.00 per 1M
+        per_units: 1000000
+      embeddings_generated:
+        price_cents: 20  # $0.20 per 1000
+        per_units: 1000
+    trial_days: 14
+
+  professional:
+    display_name: "Professional"
+    description: "For production workloads"
+    base_price_cents: 29900  # $299
+    billing_period: "monthly"
+    limits:
+      api_calls: 100000
+      tokens_processed: 20000000
+      memories_stored: 100000
+      embeddings_generated: 100000
+      queries_executed: 50000
+    rate_limits:
+      requests_per_minute: 300
+      requests_per_day: 50000
+      concurrent_requests: 20
+    features:
+      - basic_retrieval
+      - batch_operations
+      - usage_dashboard
+      - priority_support
+      - webhooks
+      - custom_models
+      - analytics_export
+    overage_allowed: true
+    overage_rates:
+      api_calls:
+        price_cents: 30  # $0.30 per 1000
+        per_units: 1000
+      tokens_processed:
+        price_cents: 300  # $3.00 per 1M
+        per_units: 1000000
+      embeddings_generated:
+        price_cents: 15  # $0.15 per 1000
+        per_units: 1000
+    trial_days: 14
+
+  enterprise:
+    display_name: "Enterprise"
+    description: "Custom solutions for large organizations"
+    base_price_cents: null  # Negotiated
+    billing_period: "monthly"
+    limits: null  # Custom
+    rate_limits:
+      requests_per_minute: 1000
+      requests_per_day: null  # Unlimited
+      concurrent_requests: 100
+    features:
+      - all
+      - dedicated_infrastructure
+      - sla_guarantee
+      - custom_integrations
+      - dedicated_support
+      - on_premise_option
+    overage_allowed: true
+    overage_rates: null  # Custom
+
+# =============================================================================
+# Add-ons
+# =============================================================================
+addons:
+  priority_processing:
+    display_name: "Priority Processing"
+    description: "Requests processed with higher priority, lower latency"
+    price_cents: 5000  # $50/month
+    billing: "monthly"
+    available_for: ["starter", "professional"]
+
+  extended_retention:
+    display_name: "Extended Data Retention"
+    description: "Keep memories beyond standard 90-day retention"
+    price_cents: 2500  # $25/month per 10K memories
+    billing: "monthly"
+    per_unit: 10000
+    unit_name: "memories"
+    available_for: ["starter", "professional"]
+
+  dedicated_embeddings:
+    display_name: "Dedicated Embedding Model"
+    description: "Custom fine-tuned embedding model for your domain"
+    price_cents: 20000  # $200/month
+    billing: "monthly"
+    available_for: ["professional", "enterprise"]
+
+  sla_99_9:
+    display_name: "99.9% SLA"
+    description: "Guaranteed 99.9% uptime with credits for violations"
+    price_cents: 10000  # $100/month
+    billing: "monthly"
+    available_for: ["professional"]
+
+# =============================================================================
+# Volume Discounts
+# =============================================================================
+volume_discounts:
+  api_calls:
+    - threshold: 100000
+      discount_percent: 10
+    - threshold: 500000
+      discount_percent: 20
+    - threshold: 1000000
+      discount_percent: 30
+
+  tokens_processed:
+    - threshold: 10000000
+      discount_percent: 10
+    - threshold: 50000000
+      discount_percent: 20
+    - threshold: 100000000
+      discount_percent: 30
+
+# =============================================================================
+# Promotions
+# =============================================================================
+promotions:
+  startup_program:
+    type: "credit"
+    credit_cents: 50000  # $500
+    eligibility: "YC, Techstars, or similar accelerator companies"
+    duration_months: 12
+    code_required: true
+
+  annual_commitment:
+    type: "discount"
+    discount_percent: 20
+    eligibility: "Annual billing commitment"
+    duration_months: 12
+
+  referral:
+    type: "credit"
+    credit_cents: 5000  # $50
+    eligibility: "Referred by existing customer"
+    duration_months: 3
+
+# =============================================================================
+# Cost Tracking (Internal - for margin analysis)
+# =============================================================================
+internal_costs:
+  openai_gpt4o_mini_input:
+    cost_per_million: 0.15  # $0.15 per 1M tokens
+  openai_gpt4o_mini_output:
+    cost_per_million: 0.60  # $0.60 per 1M tokens
+  openai_embedding_small:
+    cost_per_million: 0.02  # $0.02 per 1M tokens
+  infrastructure_per_request:
+    cost_cents: 0.001  # $0.00001 per request (amortized)
